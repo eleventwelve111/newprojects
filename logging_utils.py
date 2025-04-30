@@ -5,7 +5,7 @@ Logging utilities for the gamma-ray streaming simulation.
 import logging
 import sys
 import time
-from functools import wraps
+import functools
 from pathlib import Path
 from contextlib import contextmanager
 
@@ -20,6 +20,8 @@ def setup_logger(name="gamma_streaming", log_file="simulation.log", level=loggin
         logger.handlers.clear()
     
     # Create file handler
+    log_path = Path(log_file)
+    log_path.parent.mkdir(exist_ok=True, parents=True)
     file_handler = logging.FileHandler(log_file)
     file_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     file_handler.setFormatter(file_format)
@@ -33,66 +35,57 @@ def setup_logger(name="gamma_streaming", log_file="simulation.log", level=loggin
     
     return logger
 
-# Create a global logger instance
+# Create a default logger
 logger = setup_logger()
 
-@contextmanager
-def LogSection(section_name):
-    """
-    Context manager for logging sections with timing.
-    
-    Parameters:
-    -----------
-    section_name : str
-        Name of the section to log
+class LogSection:
+    """Context manager for logging a section of code with timing."""
+    def __init__(self, section_name):
+        self.section_name = section_name
+        self.start_time = None
         
-    Examples:
-    ---------
-    >>> with LogSection("Processing data"):
-    >>>     process_data()
-    """
-    start_time = time.time()
-    logger.info(f"⏱️  Starting: {section_name}")
+    def __enter__(self):
+        self.start_time = time.time()
+        logger.info(f"Starting: {self.section_name}")
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        elapsed_time = time.time() - self.start_time
+        if exc_type:
+            logger.error(f"Error in {self.section_name}: {exc_val}")
+        else:
+            logger.info(f"Completed: {self.section_name} ({elapsed_time:.2f} seconds)")
+        return False  # Don't suppress exceptions
+
+def timeit(func):
+    """Decorator for timing function execution."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+        logger.info(f"Starting: {func.__name__}")
+        try:
+            result = func(*args, **kwargs)
+            elapsed_time = time.time() - start_time
+            logger.info(f"Completed: {func.__name__} ({elapsed_time:.2f} seconds)")
+            return result
+        except Exception as e:
+            elapsed_time = time.time() - start_time
+            logger.error(f"Error in {func.__name__} after {elapsed_time:.2f} seconds: {str(e)}")
+            raise
+    return wrapper
+
+@contextmanager
+def log_errors(context_name="Operation", reraise=True):
+    """Context manager for catching and logging errors."""
     try:
         yield
     except Exception as e:
-        logger.error(f"❌ Error in {section_name}: {str(e)}")
-        raise
-    finally:
-        elapsed = time.time() - start_time
-        logger.info(f"✅ Completed: {section_name} (in {elapsed:.2f} seconds)")
-
-def timeit(func):
-    """
-    Decorator to measure and log the execution time of a function.
-    
-    Parameters:
-    -----------
-    func : callable
-        Function to be decorated
-        
-    Returns:
-    --------
-    callable
-        Decorated function that logs execution time
-        
-    Examples:
-    ---------
-    >>> @timeit
-    >>> def long_running_function():
-    >>>     # function body
-    """
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        start_time = time.time()
-        logger.info(f"⏱️  Starting function: {func.__name__}")
-        try:
-            result = func(*args, **kwargs)
-            return result
-        except Exception as e:
-            logger.error(f"❌ Error in {func.__name__}: {str(e)}")
+        logger.error(f"Error in {context_name}: {str(e)}", exc_info=True)
+        if reraise:
             raise
-        finally:
-            elapsed = time.time() - start_time
-            logger.info(f"✅ Completed function: {func.__name__} (in {elapsed:.2f} seconds)")
-    return wrapper
+
+def set_log_level(level):
+    """Set the log level for all handlers."""
+    logger.setLevel(level)
+    for handler in logger.handlers:
+        handler.setLevel(level)
