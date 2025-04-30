@@ -6,6 +6,7 @@ import numpy as np
 import openmc
 import matplotlib.pyplot as plt
 from logging_utils import logger, LogSection, timeit
+from config import MESH_DIMENSION
 
 @timeit
 def generate_weight_windows(model, source, particles=1e5):
@@ -30,91 +31,100 @@ def generate_weight_windows(model, source, particles=1e5):
         # Extract model components
         materials = model['materials']
         geometry = model['geometry']
+        cells = model['cells']
+        run_dir = model['run_dir']
         
         # Create a mesh for weight windows
         ww_mesh = openmc.RegularMesh()
-        ww_mesh.dimension = [20, 20, 30]
+        ww_mesh.dimension = MESH_DIMENSION
         
-        # Set mesh boundaries to cover the problem geometry
-        ww_mesh.lower_left = [-50, -50, -150]
-        ww_mesh.upper_right = [50, 50, 150]
+        # Set mesh boundaries to cover the entire problem
+        ww_mesh.lower_left = [-50, -50, -100]
+        ww_mesh.upper_right = [50, 50, 200]
         
-        # Create a mesh filter
-        ww_mesh_filter = openmc.MeshFilter(ww_mesh)
+        # Create mesh filter and tally for weight windows
+        mesh_filter = openmc.MeshFilter(ww_mesh)
+        importance_tally = openmc.Tally(name='importance')
+        importance_tally.filters = [mesh_filter]
+        importance_tally.scores = ['flux']
         
-        # Create a tally to score particle importances
-        ww_tally = openmc.Tally(name="weight_window_tally")
-        ww_tally.filters = [ww_mesh_filter]
-        ww_tally.scores = ['flux']
+        # Create a new tallies object for the weight window generation run
+        tallies = openmc.Tallies([importance_tally])
         
-        # Create tallies collection
-        tallies = openmc.Tallies([ww_tally])
-        
-        # Create settings for weight window generation
+        # Create settings for weight window generation run
         settings = openmc.Settings()
-        settings.source = source
         settings.run_mode = 'fixed source'
         settings.particles = int(particles)
         settings.batches = 10
+        settings.source = source
         
-        # Create the model
-        model = openmc.Model(geometry=geometry, materials=materials, settings=settings, tallies=tallies)
+        # Export modified XML files for weight window generation
+        ww_dir = run_dir / "weight_windows"
+        ww_dir.mkdir(exist_ok=True)
         
-        # Run a short simulation to get flux distribution
-        logger.info(f"Running initial simulation with {particles} particles for weight window generation")
-        sp_filename = model.run()
+        materials.export_to_xml(ww_dir / "materials.xml")
+        geometry.export_to_xml(ww_dir / "geometry.xml")
+        settings.export_to_xml(ww_dir / "settings.xml")
+        tallies.export_to_xml(ww_dir / "tallies.xml")
         
-        # Open the statepoint file
-        with openmc.StatePoint(sp_filename) as sp:
-            # Get the tally for weight window generation
-            tally = sp.get_tally(name="weight_window_tally")
-            
-            # Extract flux values from tally
-            flux_values = tally.get_values(scores=['flux']).flatten()
-            
-            # Replace zeros/NaNs with small positive values to avoid division by zero
-            flux_values = np.nan_to_num(flux_values, nan=1e-10, posinf=1e10, neginf=1e-10)
-            flux_values = np.maximum(flux_values, 1e-10)
-            
-            # Normalize flux values (importance) relative to source region
-            # Identify source region (assume it's near the beginning of the mesh)
-            source_region_indices = np.where(flux_values > 0.5 * np.max(flux_values))[0][:5]
-            source_importance = np.mean(flux_values[source_region_indices])
-            
-            # Calculate relative importance
-            importance = flux_values / source_importance
-            
-            # Calculate weight window bounds
-            # Lower weight bound is proportional to 1/importance
-            lower_bounds = 1.0 / importance
-            
-            # Apply bounds to avoid extreme values
-            lower_bounds = np.clip(lower_bounds, 1e-5, 1e5)
-            
-            # Upper bounds are typically 5-10 times the lower bounds
-            upper_bounds = lower_bounds * 5.0
-            
-            # Survival weight is typically the average of lower and upper bounds
-            survival_weights = 0.5 * (lower_bounds + upper_bounds)
-            
-            # Store weight window parameters
-            weight_windows = {
-                'mesh': ww_mesh,
-                'lower_bounds': lower_bounds,
-                'upper_bounds': upper_bounds,
-                'survival_weights': survival_weights,
-                'importance': importance
-            }
-            
-            logger.info(f"Generated weight windows with {len(flux_values)} mesh cells")
-            logger.info(f"Min importance: {np.min(importance):.3e}, Max importance: {np.max(importance):.3e}")
-            
-            return weight_windows
+        # Run OpenMC for weight window generation
+        logger.info(f"Running OpenMC for weight window generation ({settings.particles} particles)")
+        openmc.run(cwd=str(ww_dir), output=False)
+        
+        # Load statepoint and extract mesh tally data
+        sp_file = list(ww_dir.glob("statepoint.*.h5"))[0]
+        sp = openmc.StatePoint(sp_file)
+        
+        # Get the flux tally
+                # Get the flux tally
+        flux_tally = sp.get_tally(name='importance')
+        
+        # Extract the mesh tally data
+        mesh_data = flux_tally.get_values().reshape(MESH_DIMENSION)
+        
+        # Generate weight windows based on the mesh tally data
+        # The weight window lower bounds are typically set to 1/5 of the cell importance
+        
+        # Avoid division by zero by replacing zeros with minimum non-zero value
+        min_nonzero = np.min(mesh_data[mesh_data > 0]) if np.any(mesh_data > 0) else 1.0
+        mesh_data = np.maximum(mesh_data, min_nonzero * 1e-10)
+        
+        # Calculate ratios between adjacent cells for gradient-based weight windows
+        # We'll use a simple approach here - calculate importance as flux relative to average
+        avg_importance = np.mean(mesh_data)
+        importance_values = mesh_data / avg_importance
+        
+        # Set weight window lower bounds
+        lower_bounds = importance_values / 5.0
+        
+        # Set weight window upper bounds (typically 5x the lower bound)
+        upper_bounds = lower_bounds * 5.0
+        
+        # Create weight_windows object for OpenMC
+        weight_windows = {
+            'mesh': ww_mesh,
+            'lower_bounds': lower_bounds,
+            'upper_bounds': upper_bounds,
+            'importance_values': importance_values
+        }
+        
+        # Save weight windows data for later use
+        np.savez(ww_dir / "weight_windows.npz", 
+                 lower_bounds=lower_bounds,
+                 upper_bounds=upper_bounds,
+                 importance_values=importance_values)
+        
+        # Create a visualization of the weight windows
+        plot_weight_windows(ww_mesh, importance_values, run_dir / "weight_windows_importance.png")
+        
+        logger.info(f"Weight windows generated based on {particles} particle run")
+        
+        return weight_windows
 
 @timeit
 def apply_weight_windows(model, weight_windows):
     """
-    Apply weight windows to a model for variance reduction.
+    Apply weight windows to the model for variance reduction.
     
     Parameters:
     -----------
@@ -125,123 +135,82 @@ def apply_weight_windows(model, weight_windows):
     
     Returns:
     --------
-    updated_model : dict
-        Updated model with variance reduction
+    settings : openmc.Settings
+        Updated OpenMC settings with weight windows
     """
     with LogSection("Applying weight windows"):
-        # Extract model components
-        materials = model['materials']
-        geometry = model['geometry']
-        tallies = model.get('tallies', None)
-        settings = model.get('settings', None)
+        # Extract components
+        settings = model['settings']
+        run_dir = model['run_dir']
         
-        if settings is None:
-            settings = openmc.Settings()
-        
-        # Create weight window mesh
+        # Extract weight window data
         ww_mesh = weight_windows['mesh']
         lower_bounds = weight_windows['lower_bounds']
         upper_bounds = weight_windows['upper_bounds']
-        survival_weights = weight_windows['survival_weights']
         
-        # Create weight window object
-        weight_window = openmc.WeightWindows(
-            mesh=ww_mesh,
-            lower_bounds=lower_bounds,
-            upper_bounds=upper_bounds,
-            survival_weights=survival_weights
-        )
+        # Create weight windows file
+        ww_file = run_dir / "weight_windows.xml"
         
-        # Add weight window to settings
-        settings.weight_windows = [weight_window]
+        # Apply the weight windows to the settings
+        settings.weight_windows = {
+            'mesh': ww_mesh,
+            'lower_bounds': lower_bounds,
+            'upper_bounds': upper_bounds
+        }
         
-        # Set weight cutoff to be less than the minimum lower weight bound
-        min_weight = np.min(lower_bounds) * 0.1
-        settings.weight_cutoff = (min_weight, 0.5)
-        
-        # Enable survival biasing
+        # Update survival_biasing
         settings.survival_biasing = True
         
-        # Update the model
-        updated_model = model.copy()
-        updated_model['settings'] = settings
+        # Export updated settings
+        settings.export_to_xml(run_dir / "settings.xml")
         
-        logger.info("Applied weight windows to model")
-        logger.info(f"Set weight cutoff to ({min_weight:.3e}, 0.5)")
+        logger.info(f"Weight windows applied to model")
         
-        return updated_model
+        return settings
 
-def plot_weight_windows(weight_windows, slice_dim='z', slice_index=15):
+def plot_weight_windows(mesh, importance_values, output_file):
     """
-    Plot weight windows for a specific slice.
+    Plot weight window importance values.
     
     Parameters:
     -----------
-    weight_windows : dict
-        Weight window parameters
-    slice_dim : str
-        Dimension to slice ('x', 'y', or 'z')
-    slice_index : int
-        Index of the slice to plot
-    
-    Returns:
-    --------
-    fig : matplotlib.Figure
-        Figure containing the weight window plot
+    mesh : openmc.RegularMesh
+        Mesh used for weight windows
+    importance_values : numpy.ndarray
+        Importance values for each mesh cell
+    output_file : str or Path
+        Output file path
     """
-    # Extract mesh dimensions
-    mesh = weight_windows['mesh']
-    nx, ny, nz = mesh.dimension
+    # Create a slice through the center of the mesh
+    central_slice = importance_values[:, mesh.dimension[1]//2, :]
     
-    # Extract importance values
-    importance = weight_windows['importance']
-    
-    # Reshape importance to mesh dimensions
-    importance_3d = importance.reshape(nx, ny, nz)
+    # Take log of importance for better visualization
+    log_importance = np.log10(central_slice)
     
     # Create figure
-    fig, ax = plt.subplots(figsize=(10, 8))
+    fig, ax = plt.subplots(figsize=(12, 8))
     
-    # Extract the slice based on dimension
-    if slice_dim == 'x':
-        if slice_index >= nx:
-            slice_index = nx // 2
-        slice_data = importance_3d[slice_index, :, :]
-        extent = [mesh.lower_left[2], mesh.upper_right[2], 
-                  mesh.lower_left[1], mesh.upper_right[1]]
-        xlabel = 'Z'
-        ylabel = 'Y'
-    elif slice_dim == 'y':
-        if slice_index >= ny:
-            slice_index = ny // 2
-        slice_data = importance_3d[:, slice_index, :]
-        extent = [mesh.lower_left[2], mesh.upper_right[2], 
-                  mesh.lower_left[0], mesh.upper_right[0]]
-        xlabel = 'Z'
-        ylabel = 'X'
-    else:  # z
-        if slice_index >= nz:
-            slice_index = nz // 2
-        slice_data = importance_3d[:, :, slice_index]
-        extent = [mesh.lower_left[0], mesh.upper_right[0], 
-                  mesh.lower_left[1], mesh.upper_right[1]]
-        xlabel = 'X'
-        ylabel = 'Y'
-    
-    # Plot importance as a color map
-    im = ax.imshow(slice_data.T, origin='lower', extent=extent, 
-                   cmap='viridis', norm=plt.LogNorm())
+    # Plot importance map
+    im = ax.imshow(log_importance.T, origin='lower', aspect='auto', cmap='jet',
+                   extent=[-50, 50, -100, 200])
     
     # Add colorbar
     cbar = plt.colorbar(im, ax=ax)
-    cbar.set_label('Relative Importance')
+    cbar.set_label('Log10(Importance)', rotation=270, labelpad=20)
     
     # Add labels and title
-    ax.set_xlabel(f'{xlabel} (cm)')
-    ax.set_ylabel(f'{ylabel} (cm)')
-    ax.set_title(f'Weight Window Importance - {slice_dim.upper()} Slice {slice_index}')
+    ax.set_xlabel('X (cm)')
+    ax.set_ylabel('Z (cm)')
+    ax.set_title('Weight Window Importance Values (Y-center slice)')
     
-    # Add grid
-    ax.grid(True, linestyle='--', alpha=0.3)
+    # Add annotation for key areas
+    ax.axhline(y=0, color='white', linestyle='--', alpha=0.5)
+    ax.axhline(y=WALL_THICKNESS, color='white', linestyle='--', alpha=0.5)
+    ax.text(-45, -50, 'Source Region', color='white')
+    ax.text(-45, WALL_THICKNESS/2, 'Concrete Wall', color='white')
+    ax.text(-45, WALL_THICKNESS + 20, 'Detector Region', color='white')
     
-    return fig
+    # Save the figure
+    plt.savefig(output_file, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+
