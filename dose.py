@@ -583,4 +583,54 @@ if __name__ == "__main__":
     plt.savefig(output_dir / "buildup_factors.png", dpi=300)
     
     logger.info(f"Dose evaluation plots saved to {output_dir}")
-
+def calculate_shielding_effectiveness(unshielded_dose: float, shielded_dose: float) -> Dict[str, float]:
+    """
+    Calculate metrics for shielding effectiveness.
+    
+    Parameters:
+    -----------
+    unshielded_dose : float
+        Dose without shielding
+    shielded_dose : float
+        Dose with shielding
+    
+    Returns:
+    --------
+    metrics : dict
+        Shielding effectiveness metrics
+    """
+    with LogSection("Calculating shielding effectiveness"):
+        if unshielded_dose <= 0:
+            logger.warning("Invalid unshielded dose (zero or negative)")
+            return {
+                'attenuation_factor': 0.0,
+                'dose_reduction_percent': 0.0,
+                'transmission_percent': 100.0,
+                'half_value_equivalent': 0.0
+            }
+        
+        # Calculate attenuation factor
+        attenuation_factor = unshielded_dose / max(shielded_dose, 1e-10)
+        
+        # Calculate dose reduction percentage
+        dose_reduction = ((unshielded_dose - shielded_dose) / unshielded_dose) * 100.0
+        
+        # Calculate transmission percentage
+        transmission = (shielded_dose / unshielded_dose) * 100.0
+        
+        # Calculate half-value layer equivalent
+        if shielded_dose > 0:
+            hvl_equivalent = np.log2(attenuation_factor)
+        else:
+            hvl_equivalent = 0.0  # Undefined for zero shielded dose
+        
+        # Prepare metrics dictionary
+        metrics = {
+            'attenuation_factor': float(attenuation_factor),
+            'dose_reduction_percent': float(dose_reduction),
+            'transmission_percent': float(transmission),
+            'half_value_equivalent': float(hvl_equivalent)
+        }
+        
+        logger.info(f"Shielding effectiveness: {dose_reduction:.1f}% reduction, {attenuation_factor:.2f}x attenuation")
+        return metrics
