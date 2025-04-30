@@ -7,6 +7,7 @@ import sys
 import time
 from functools import wraps
 from pathlib import Path
+from contextlib import contextmanager
 
 # Configure the logger
 def setup_logger(name="gamma_streaming", log_file="simulation.log", level=logging.INFO):
@@ -32,101 +33,66 @@ def setup_logger(name="gamma_streaming", log_file="simulation.log", level=loggin
     
     return logger
 
-# Create the main logger
+# Create a global logger instance
 logger = setup_logger()
 
-# Decorator for timing functions
+@contextmanager
+def LogSection(section_name):
+    """
+    Context manager for logging sections with timing.
+    
+    Parameters:
+    -----------
+    section_name : str
+        Name of the section to log
+        
+    Examples:
+    ---------
+    >>> with LogSection("Processing data"):
+    >>>     process_data()
+    """
+    start_time = time.time()
+    logger.info(f"⏱️  Starting: {section_name}")
+    try:
+        yield
+    except Exception as e:
+        logger.error(f"❌ Error in {section_name}: {str(e)}")
+        raise
+    finally:
+        elapsed = time.time() - start_time
+        logger.info(f"✅ Completed: {section_name} (in {elapsed:.2f} seconds)")
+
 def timeit(func):
-    """Decorator to measure function execution time."""
+    """
+    Decorator to measure and log the execution time of a function.
+    
+    Parameters:
+    -----------
+    func : callable
+        Function to be decorated
+        
+    Returns:
+    --------
+    callable
+        Decorated function that logs execution time
+        
+    Examples:
+    ---------
+    >>> @timeit
+    >>> def long_running_function():
+    >>>     # function body
+    """
     @wraps(func)
     def wrapper(*args, **kwargs):
         start_time = time.time()
-        logger.info(f"Starting {func.__name__}...")
-        result = func(*args, **kwargs)
-        end_time = time.time()
-        duration = end_time - start_time
-        if duration < 60:
-            logger.info(f"Completed {func.__name__} in {duration:.2f} seconds")
-        elif duration < 3600:
-            logger.info(f"Completed {func.__name__} in {duration/60:.2f} minutes")
-        else:
-            logger.info(f"Completed {func.__name__} in {duration/3600:.2f} hours")
-        return result
-    return wrapper
-
-# Progress bar
-def progress_bar(current, total, bar_length=50):
-    """Display a text progress bar."""
-    percent = float(current) / total
-    arrow = '-' * int(round(percent * bar_length))
-    spaces = ' ' * (bar_length - len(arrow))
-    
-    sys.stdout.write(f"\r[{arrow}{spaces}] {int(percent*100)}% ({current}/{total})")
-    sys.stdout.flush()
-    
-    if current == total:
-        sys.stdout.write('\n')
-
-# Create a context manager for sections of code
-class LogSection:
-    """Context manager for logging sections of code."""
-    def __init__(self, section_name, level=logging.INFO):
-        self.section_name = section_name
-        self.level = level
-        
-    def __enter__(self):
-        logger.log(self.level, f"=== Starting section: {self.section_name} ===")
-        self.start_time = time.time()
-        return self
-        
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        duration = time.time() - self.start_time
-        if exc_type is not None:
-            logger.error(f"Error in section {self.section_name}: {exc_val}")
-        elif duration < 60:
-            logger.log(self.level, f"=== Completed section: {self.section_name} in {duration:.2f} seconds ===")
-        elif duration < 3600:
-            logger.log(self.level, f"=== Completed section: {self.section_name} in {duration/60:.2f} minutes ===")
-        else:
-            logger.log(self.level, f"=== Completed section: {self.section_name} in {duration/3600:.2f} hours ===")
-# ... existing code ...
-
-# Add the logger
-logger = setup_logger()
-
-class LogSection:
-    """Context manager for logging sections with timing."""
-    def __init__(self, section_name):
-        self.section_name = section_name
-        self.start_time = None
-        
-    def __enter__(self):
-        self.start_time = time.time()
-        logger.info(f"▶️ Starting: {self.section_name}")
-        return self
-        
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        elapsed = time.time() - self.start_time
-        if exc_type is None:
-            logger.info(f"✅ Completed: {self.section_name} (in {elapsed:.2f} seconds)")
-        else:
-            logger.error(f"❌ Failed: {self.section_name} - {exc_val}")
-        return False  # Don't suppress exceptions
-
-def timeit(func):
-    """Decorator to log function execution time."""
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        start_time = time.time()
-        logger.info(f"▶️ Starting: {func.__name__}")
+        logger.info(f"⏱️  Starting function: {func.__name__}")
         try:
             result = func(*args, **kwargs)
-            elapsed = time.time() - start_time
-            logger.info(f"✅ Completed: {func.__name__} (in {elapsed:.2f} seconds)")
             return result
         except Exception as e:
-            elapsed = time.time() - start_time
-            logger.error(f"❌ Failed: {func.__name__} after {elapsed:.2f} seconds - {str(e)}")
+            logger.error(f"❌ Error in {func.__name__}: {str(e)}")
             raise
+        finally:
+            elapsed = time.time() - start_time
+            logger.info(f"✅ Completed function: {func.__name__} (in {elapsed:.2f} seconds)")
     return wrapper
-
