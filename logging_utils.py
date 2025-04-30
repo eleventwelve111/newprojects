@@ -89,3 +89,44 @@ class LogSection:
             logger.log(self.level, f"=== Completed section: {self.section_name} in {duration/60:.2f} minutes ===")
         else:
             logger.log(self.level, f"=== Completed section: {self.section_name} in {duration/3600:.2f} hours ===")
+# ... existing code ...
+
+# Add the logger
+logger = setup_logger()
+
+class LogSection:
+    """Context manager for logging sections with timing."""
+    def __init__(self, section_name):
+        self.section_name = section_name
+        self.start_time = None
+        
+    def __enter__(self):
+        self.start_time = time.time()
+        logger.info(f"▶️ Starting: {self.section_name}")
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        elapsed = time.time() - self.start_time
+        if exc_type is None:
+            logger.info(f"✅ Completed: {self.section_name} (in {elapsed:.2f} seconds)")
+        else:
+            logger.error(f"❌ Failed: {self.section_name} - {exc_val}")
+        return False  # Don't suppress exceptions
+
+def timeit(func):
+    """Decorator to log function execution time."""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+        logger.info(f"▶️ Starting: {func.__name__}")
+        try:
+            result = func(*args, **kwargs)
+            elapsed = time.time() - start_time
+            logger.info(f"✅ Completed: {func.__name__} (in {elapsed:.2f} seconds)")
+            return result
+        except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(f"❌ Failed: {func.__name__} after {elapsed:.2f} seconds - {str(e)}")
+            raise
+    return wrapper
+
