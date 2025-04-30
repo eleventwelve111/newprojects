@@ -230,3 +230,52 @@ def calculate_kerma_to_dose_ratio(energy):
     else:
         # High energy - significant electron transport effects
         return 1.15
+
+
+def plot_theoretical_vs_simulated(theoretical_doses, simulated_doses, 
+                                 distances, angles, energies, channel_diameters):
+    """
+    Create plots comparing theoretical and simulated doses
+    
+    Parameters:
+    -----------
+    theoretical_doses : dict
+        Dictionary of theoretical dose data
+    simulated_doses : dict
+        Dictionary of simulated dose data
+    distances : list
+        List of distances in cm
+    angles : list
+        List of angles in degrees
+    energies : list
+        List of energies in MeV
+    channel_diameters : list
+        List of channel diameters in cm
+    """
+    # Create comparison plots for each energy and channel diameter
+    for energy in energies:
+        for diameter in channel_diameters:
+            plt.figure(figsize=(12, 8))
+            
+            for dist in distances:
+                # Theoretical data
+                theo_doses = [theoretical_doses[(energy, diameter, dist, ang)][0] for ang in angles]
+                theo_direct = [theoretical_doses[(energy, diameter, dist, ang)][1] for ang in angles]
+                theo_inverse = [theoretical_doses[(energy, diameter, dist, ang)][2] for ang in angles]
+                
+                # Simulated data
+                sim_doses = [simulated_doses.get((energy, diameter, dist, ang), 0) for ang in angles]
+                
+                # Plot
+                plt.semilogy(angles, theo_doses, 'b-', label=f'Theoretical (SA) {dist} cm' if dist == distances[0] else "")
+                plt.semilogy(angles, theo_direct, 'g--', label=f'Theoretical (DB) {dist} cm' if dist == distances[0] else "")
+                plt.semilogy(angles, theo_inverse, 'm-.', label=f'Theoretical (IS) {dist} cm' if dist == distances[0] else "")
+                plt.semilogy(angles, sim_doses, 'ro-', label=f'Simulated {dist} cm')
+                
+            plt.title(f'Dose vs Angle (E={energy} MeV, Channel Ø={diameter} cm)')
+            plt.xlabel('Angle (degrees)')
+            plt.ylabel('Dose (rem/hr)')
+            plt.legend()
+            plt.grid(True, which="both", ls="--")
+            plt.savefig(f'dose_comparison_E{energy}_D{diameter}.png', dpi=300)
+            plt.close()
