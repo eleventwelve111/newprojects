@@ -8,18 +8,14 @@ import math
 from config import WALL_THICKNESS, SOURCE_TO_WALL_DISTANCE, DETECTOR_DIAMETER
 from logging_utils import logger, LogSection
 
-def create_geometry(concrete, air, tissue, channel_diameter, detector_distance, detector_angle, concrete_type="standard"):
+def create_geometry(materials_dict, channel_diameter, detector_distance, detector_angle, concrete_type="standard"):
     """
     Create geometry for the simulation with a concrete wall, air channel, and ICRU sphere.
     
     Parameters:
     -----------
-    concrete : openmc.Material
-        Concrete material
-    air : openmc.Material
-        Air material
-    tissue : openmc.Material
-        Tissue material (ICRU sphere)
+    materials_dict : dict
+        Dictionary of materials
     channel_diameter : float
         Diameter of the air channel in cm
     detector_distance : float
@@ -27,138 +23,110 @@ def create_geometry(concrete, air, tissue, channel_diameter, detector_distance, 
     detector_angle : float
         Angle of the detector from the central axis in degrees
     concrete_type : str
-        Type of concrete to use (standard, barite, magnetite)
-        
+        Type of concrete to use ("standard", "barite", or "magnetite")
+    
     Returns:
     --------
     geometry : openmc.Geometry
         OpenMC geometry
+    cells : dict
+        Dictionary of cells
     """
-    with LogSection(f"Creating geometry (channel Ø={channel_diameter} cm, dist={detector_distance} cm, ang={detector_angle}°)"):
-        # Dimensions
-        channel_radius = channel_diameter / 2.0
+    with LogSection(f"Creating geometry (channel Ø={channel_diameter} cm, detector at {detector_distance} cm, {detector_angle}°)"):
+        # Get materials
+        if concrete_type == "barite":
+            concrete = materials_dict['barite_concrete']
+            logger.info("Using barite concrete (high-density)")
+        elif concrete_type == "magnetite":
+            concrete = materials_dict['magnetite_concrete']
+            logger.info("Using magnetite concrete (high-density)")
+        else:
+            concrete = materials_dict['standard_concrete']
+            logger.info("Using standard concrete")
+            
+        air = materials_dict['air']
+        tissue = materials_dict['tissue']
+        void = materials_dict['void']
         
-        # Define boundary box dimensions (make it large enough to contain everything)
-        boundary_box_width = 500.0  # cm
-        boundary_box_height = 500.0  # cm
-        boundary_box_depth = SOURCE_TO_WALL_DISTANCE + WALL_THICKNESS + detector_distance * 2  # cm
+        # Create region for world
+        world_min = -200
+        world_max = 400
+        world_box = openmc.model.rectangular_prism(
+            width=world_max-world_min, 
+            height=world_max-world_min, 
+            axis='z',
+            origin=(0, 0, (world_max+world_min)/2),
+            boundary_type='vacuum'
+        )
         
-        # Create concrete wall
-        wall_min_x = boundary_box_width / -2
-        wall_max_x = boundary_box_width / 2
-        wall_min_y = boundary_box_height / -2
-        wall_max_y = boundary_box_height / 2
-        wall_min_z = 0.0
+        # Wall region
+        wall_min_z = 0
         wall_max_z = WALL_THICKNESS
+        wall_region = openmc.model.rectangular_prism(
+            width=200, 
+            height=200, 
+            axis='z',
+            origin=(0, 0, WALL_THICKNESS/2),
+            boundary_type='transmission'
+        )
+        wall_region = wall_region & openmc.ZPlane(z0=wall_min_z) & -openmc.ZPlane(z0=wall_max_z)
         
-        wall_region = +openmc.ZPlane(wall_min_z) & -openmc.ZPlane(wall_max_z) & \
-                      +openmc.XPlane(wall_min_x) & -openmc.XPlane(wall_max_x) & \
-                      +openmc.YPlane(wall_min_y) & -openmc.YPlane(wall_max_y)
+        # Air channel (cylindrical)
+        channel_radius = channel_diameter / 2.0
+        channel_region = openmc.ZCylinder(r=channel_radius)
+        channel_region = channel_region & openmc.ZPlane(z0=wall_min_z) & -openmc.ZPlane(z0=wall_max_z)
         
-        # Create air channel through wall (cylindrical)
-        channel_axis = openmc.ZCylinder(x0=0, y0=0, r=channel_radius)
-        channel_region = channel_axis & +openmc.ZPlane(wall_min_z) & -openmc.ZPlane(wall_max_z)
+        # Define the concrete wall cell (with the air channel subtracted)
+        concrete_cell = openmc.Cell(name='Concrete Wall')
+        concrete_cell.region = wall_region & ~channel_region
+        concrete_cell.fill = concrete
         
-        # Create concrete wall with channel
-        wall_with_channel_region = wall_region & ~channel_region
-        wall_with_channel_cell = openmc.Cell(name='concrete_wall')
-        wall_with_channel_cell.region = wall_with_channel_region
-        wall_with_channel_cell.fill = concrete
+        # Define the air channel cell
+        air_channel_cell = openmc.Cell(name='Air Channel')
+        air_channel_cell.region = channel_region
+        air_channel_cell.fill = air
         
-        # Create channel cell
-        channel_cell = openmc.Cell(name='air_channel')
-        channel_cell.region = channel_region
-        channel_cell.fill = air
+        # Define detector (ICRU sphere)
+        detector_radius = DETECTOR_DIAMETER / 2.0
         
-        # Create ICRU sphere at specified distance and angle
-        # First calculate the position
-        sphere_z = WALL_THICKNESS + detector_distance * np.cos(np.radians(detector_angle))
-        sphere_x = detector_distance * np.sin(np.radians(detector_angle))
-        sphere_y = 0.0
+        # Calculate detector position based on distance and angle
+        angle_rad = np.radians(detector_angle)
+        detector_z = wall_max_z + detector_distance * np.cos(angle_rad)
+        detector_x = detector_distance * np.sin(angle_rad)
+        detector_y = 0.0
         
-        detector_sphere = openmc.Sphere(x0=sphere_x, y0=sphere_y, z0=sphere_z, r=DETECTOR_DIAMETER/2)
-        detector_cell = openmc.Cell(name='detector')
-        detector_cell.region = -detector_sphere
+        detector_region = openmc.Sphere(x0=detector_x, y0=detector_y, z0=detector_z, r=detector_radius)
+        detector_cell = openmc.Cell(name='ICRU Detector')
+        detector_cell.region = detector_region
         detector_cell.fill = tissue
         
-        # Create void cell for the external environment
-        box_region = +openmc.XPlane(wall_min_x) & -openmc.XPlane(wall_max_x) & \
-                    +openmc.YPlane(wall_min_y) & -openmc.YPlane(wall_max_y) & \
-                    +openmc.ZPlane(-SOURCE_TO_WALL_DISTANCE) & -openmc.ZPlane(wall_max_z + 300)
+        # Source region (before wall)
+        source_region = -openmc.ZPlane(z0=wall_min_z)
+        source_cell = openmc.Cell(name='Source Region')
+        source_cell.region = source_region & world_box
+        source_cell.fill = void
         
-        # Void region is everything else inside the boundary box
-        void_region = box_region & ~wall_with_channel_region & ~channel_region & ~detector_cell.region
-        void_cell = openmc.Cell(name='void')
-        void_cell.region = void_region
+        # External void region (after wall)
+        external_region = +openmc.ZPlane(z0=wall_max_z)
+        external_cell = openmc.Cell(name='External Void')
+        external_cell.region = external_region & world_box & ~detector_region
+        external_cell.fill = void
         
-        # Set boundary conditions
-        for surface in [openmc.XPlane(wall_min_x), openmc.XPlane(wall_max_x),
-                        openmc.YPlane(wall_min_y), openmc.YPlane(wall_max_y),
-                        openmc.ZPlane(-SOURCE_TO_WALL_DISTANCE), openmc.ZPlane(wall_max_z + 300)]:
-            surface.boundary_type = 'vacuum'
+        # Create universe and geometry
+        universe = openmc.Universe(cells=[concrete_cell, air_channel_cell, 
+                                         detector_cell, source_cell, external_cell])
+        geometry = openmc.Geometry(universe)
         
-        # Create geometry
-        geometry = openmc.Geometry([wall_with_channel_cell, channel_cell, detector_cell, void_cell])
+        # Create dictionary of cells for tallies
+        cells = {
+            'concrete': concrete_cell,
+            'channel': air_channel_cell,
+            'detector': detector_cell,
+            'source_region': source_cell,
+            'external': external_cell
+        }
         
-        # Export to XML for visualization and verification
-        geometry.export_to_xml()
+        logger.info(f"Created geometry with concrete shield and {channel_diameter} cm diameter air channel")
+        logger.info(f"Detector positioned at ({detector_x:.2f}, {detector_y:.2f}, {detector_z:.2f}) cm")
         
-        # Log the geometry details
-        logger.info(f"Created concrete wall with thickness {WALL_THICKNESS} cm")
-        logger.info(f"Created air channel with diameter {channel_diameter} cm")
-        logger.info(f"Created ICRU sphere at distance {detector_distance} cm and angle {detector_angle}°")
-        
-        return geometry
-
-
-def create_plot(channel_diameter=10.0):
-    """
-    Create plots for visualization.
-    
-    Parameters:
-    -----------
-    channel_diameter : float
-        Diameter of the air channel in cm
-    
-    Returns:
-    --------
-    plots : list
-        List of plot objects
-    """
-    with LogSection("Creating visualization plots"):
-        plots = []
-        
-        # XY plot - perpendicular to the channel
-        xy_plot = openmc.Plot(name='xy')
-        xy_plot.basis = 'xy'
-        xy_plot.origin = (0, 0, WALL_THICKNESS / 2)
-        xy_plot.width = (100, 100)
-        xy_plot.pixels = (500, 500)
-        xy_plot.color_by = 'material'
-        plots.append(xy_plot)
-        
-        # XZ plot - along the channel
-        xz_plot = openmc.Plot(name='xz')
-        xz_plot.basis = 'xz'
-        xz_plot.origin = (0, 0, 0)
-        xz_plot.width = (100, WALL_THICKNESS + SOURCE_TO_WALL_DISTANCE + 100)
-        xz_plot.pixels = (500, 800)
-        xz_plot.color_by = 'material'
-        plots.append(xz_plot)
-        
-        # YZ plot - along the channel (orthogonal view)
-        yz_plot = openmc.Plot(name='yz')
-        yz_plot.basis = 'yz'
-        yz_plot.origin = (0, 0, 0)
-        yz_plot.width = (100, WALL_THICKNESS + SOURCE_TO_WALL_DISTANCE + 100)
-        yz_plot.pixels = (500, 800)
-        yz_plot.color_by = 'material'
-        plots.append(yz_plot)
-        
-        # Create a plot file
-        plot_file = openmc.Plots(plots)
-        plot_file.export_to_xml()
-        
-        logger.info(f"Created {len(plots)} plots for visualization")
-        
-        return plots
+        return geometry, cells
