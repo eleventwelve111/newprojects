@@ -4,6 +4,7 @@ Source definition for gamma-ray streaming simulation through concrete shield.
 """
 import openmc
 import numpy as np
+import math
 from config import SOURCE_TO_WALL_DISTANCE, WALL_THICKNESS
 from logging_utils import logger, LogSection
 
@@ -32,48 +33,43 @@ def create_point_source(energy, channel_radius, biased=True):
         # Define energy distribution (monoenergetic)
         energy_dist = openmc.stats.Discrete([energy], [1.0])
         
-        # Calculate solid angle subtended by the channel
-        # For a cone with height h and base radius r:
-        # solid_angle = 2π(1 - cos(θ)) where θ = tan^-1(r/h)
-        h = SOURCE_TO_WALL_DISTANCE
-        r = channel_radius
-        theta = np.arctan(r / h)
-        solid_angle = 2 * np.pi * (1 - np.cos(theta))
-        total_angle = 4 * np.pi  # Full sphere
-        
-        # Calculate the fraction of particles that would hit the channel
-        # This is the ratio of the solid angle to the total angle
-        channel_fraction = solid_angle / total_angle
-        
-        logger.info(f"Channel subtends a solid angle of {solid_angle:.6f} sr")
-        logger.info(f"Fraction of particles that would hit channel: {channel_fraction:.6f}")
+        # Calculate the solid angle subtended by the channel
+        # from the source position
+        theta_max = np.arctan(channel_radius / SOURCE_TO_WALL_DISTANCE)
         
         if biased:
-            # Biased sampling to ensure particles are directed toward the channel
-            # Define a conical distribution directed toward the channel
-            cone_mu = np.cos(theta)
+            # Create a biased angular distribution to focus toward the channel
+            # without biasing physics once particles are sampled
+            mu_min = np.cos(theta_max)
             
-            # Define spatial distribution as point source
-            spatial_dist = openmc.stats.Point(position)
-            
-            # Define angle distribution (biased toward channel)
-            angle_dist = openmc.stats.Monodirectional((0, 0, 1))
-            
-            # Create source
-            source = openmc.Source(space=spatial_dist, angle=angle_dist, energy=energy_dist)
-            
-            # Define the reference direction (toward the channel entrance)
-            source.angle = openmc.stats.PolarAzimuthal(
-                mu=openmc.stats.Uniform(cone_mu, 1.0),
-                phi=openmc.stats.Uniform(0., 2*np.pi)
+            # Create a custom angular distribution that focuses towards the channel
+            # This ensures 100% of particles go through the channel
+            def custom_pdf(theta, phi):
+                # Only sample directions within cone to channel
+                if np.cos(theta) >= mu_min:
+                    return 1.0
+                else:
+                    return 0.0
+                    
+            # Create the biased angular distribution
+            angle_dist = openmc.stats.PolarAzimuthal(
+                mu=openmc.stats.CustomDiscrete(
+                    np.linspace(mu_min, 1.0, 20),
+                    np.ones(20) / 20
+                ),
+                phi=openmc.stats.Uniform(0, 2*np.pi)
             )
             
-            logger.info(f"Created biased point source with cone_mu={cone_mu:.6f}")
+            logger.info(f"Source biased toward channel with max angle: {np.degrees(theta_max):.4f} degrees")
+            logger.info(f"Fraction of isotropic source directed at channel: {(1-mu_min)/2:.6e}")
         else:
-            # Isotropic source - not biased
-            source = openmc.Source(space=openmc.stats.Point(position),
-                                   angle=openmc.stats.Isotropic(),
-                                   energy=energy_dist)
-            logger.info("Created isotropic point source")
+            # Use isotropic emission for unbiased source
+            angle_dist = openmc.stats.Isotropic()
+            logger.info("Using isotropic source (no bias)")
+        
+        # Create source
+        source = openmc.Source(space=openmc.stats.Point(position),
+                              angle=angle_dist,
+                              energy=energy_dist)
         
         return source
