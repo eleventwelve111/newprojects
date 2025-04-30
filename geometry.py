@@ -109,3 +109,56 @@ def create_geometry(concrete, air, tissue, channel_diameter, detector_distance, 
         logger.info(f"Created ICRU sphere at distance {detector_distance} cm and angle {detector_angle}°")
         
         return geometry
+
+
+def create_plot(channel_diameter=10.0):
+    """
+    Create plots for visualization.
+    
+    Parameters:
+    -----------
+    channel_diameter : float
+        Diameter of the air channel in cm
+    
+    Returns:
+    --------
+    plots : list
+        List of plot objects
+    """
+    with LogSection("Creating visualization plots"):
+        plots = []
+        
+        # XY plot - perpendicular to the channel
+        xy_plot = openmc.Plot(name='xy')
+        xy_plot.basis = 'xy'
+        xy_plot.origin = (0, 0, WALL_THICKNESS / 2)
+        xy_plot.width = (100, 100)
+        xy_plot.pixels = (500, 500)
+        xy_plot.color_by = 'material'
+        plots.append(xy_plot)
+        
+        # XZ plot - along the channel
+        xz_plot = openmc.Plot(name='xz')
+        xz_plot.basis = 'xz'
+        xz_plot.origin = (0, 0, 0)
+        xz_plot.width = (100, WALL_THICKNESS + SOURCE_TO_WALL_DISTANCE + 100)
+        xz_plot.pixels = (500, 800)
+        xz_plot.color_by = 'material'
+        plots.append(xz_plot)
+        
+        # YZ plot - along the channel (orthogonal view)
+        yz_plot = openmc.Plot(name='yz')
+        yz_plot.basis = 'yz'
+        yz_plot.origin = (0, 0, 0)
+        yz_plot.width = (100, WALL_THICKNESS + SOURCE_TO_WALL_DISTANCE + 100)
+        yz_plot.pixels = (500, 800)
+        yz_plot.color_by = 'material'
+        plots.append(yz_plot)
+        
+        # Create a plot file
+        plot_file = openmc.Plots(plots)
+        plot_file.export_to_xml()
+        
+        logger.info(f"Created {len(plots)} plots for visualization")
+        
+        return plots
