@@ -279,3 +279,308 @@ def plot_theoretical_vs_simulated(theoretical_doses, simulated_doses,
             plt.grid(True, which="both", ls="--")
             plt.savefig(f'dose_comparison_E{energy}_D{diameter}.png', dpi=300)
             plt.close()
+
+        5.23E-3, 5.60E-3, 5.80E-3, 6.01E-3, 6.37E-3, 6.74E-3, 7.11E-3, 7.66E-3, 8.77E-3, 
+        1.03E-2, 1.18E-2, 1.33E-2
+    ])
+    
+    # Handle different input types
+    if np.isscalar(energy):
+        # For single energy value
+        if energy <= energy_points[0]:
+            return dose_coeffs[0]
+        elif energy >= energy_points[-1]:
+            return dose_coeffs[-1]
+        else:
+            # Log-log interpolation for better accuracy
+            log_energy = np.log(energy_points)
+            log_coeffs = np.log(dose_coeffs)
+            log_interp = np.interp(np.log(energy), log_energy, log_coeffs)
+            return np.exp(log_interp)
+    else:
+        # For array of energy values
+        energy_array = np.asarray(energy)
+        result = np.zeros_like(energy_array)
+        
+        # Handle values below minimum
+        below_min = energy_array <= energy_points[0]
+        result[below_min] = dose_coeffs[0]
+        
+        # Handle values above maximum
+        above_max = energy_array >= energy_points[-1]
+        result[above_max] = dose_coeffs[-1]
+        
+        # Handle values in range
+        in_range = ~(below_min | above_max)
+        if np.any(in_range):
+            # Log-log interpolation for better accuracy
+            log_energy = np.log(energy_points)
+            log_coeffs = np.log(dose_coeffs)
+            log_interp = np.interp(np.log(energy_array[in_range]), log_energy, log_coeffs)
+            result[in_range] = np.exp(log_interp)
+        
+        return result
+
+@timeit
+def calculate_dose_from_spectrum(energy_bins, flux_spectrum):
+    """
+    Calculate dose from energy spectrum.
+    
+    Parameters:
+    -----------
+    energy_bins : array-like
+        Energy bin boundaries in MeV
+    flux_spectrum : array-like
+        Flux spectrum in particles/cm²/s/MeV
+    
+    Returns:
+    --------
+    total_dose : float
+        Total dose rate in rem/hr
+    dose_contributions : array-like
+        Dose contribution from each energy bin in rem/hr
+    """
+    with LogSection("Calculating dose from spectrum"):
+        # Ensure inputs are numpy arrays
+        energy_bins = np.asarray(energy_bins)
+        flux_spectrum = np.asarray(flux_spectrum)
+        
+        # Check input validity
+        if len(energy_bins) != len(flux_spectrum) + 1:
+            raise ValueError("Energy bins should have one more element than flux spectrum")
+        
+        # Calculate bin widths
+        bin_widths = np.diff(energy_bins)
+        
+        # Calculate midpoints for dose conversion
+        energy_midpoints = 0.5 * (energy_bins[:-1] + energy_bins[1:])
+        
+        # Get dose conversion factors for each energy bin
+        dose_factors = flux_to_dose_conversion(energy_midpoints)
+        
+        # Calculate dose contribution from each bin
+        dose_contributions = flux_spectrum * bin_widths * dose_factors
+        
+        # Calculate total dose
+        total_dose = np.sum(dose_contributions)
+        
+        logger.info(f"Calculated dose from spectrum: {total_dose:.4e} rem/hr")
+        
+        return total_dose, dose_contributions
+
+@timeit
+def calculate_buildup_factor(energy, thickness, material='concrete'):
+    """
+    Calculate gamma-ray buildup factor for dose calculations.
+    
+    Parameters:
+    -----------
+    energy : float
+        Photon energy in MeV
+    thickness : float
+        Material thickness in cm
+    material : str, default='concrete'
+        Shield material
+    
+    Returns:
+    --------
+    buildup : float
+        Buildup factor (dimensionless)
+    """
+    with LogSection(f"Calculating buildup factor for {material}"):
+        # Thickness in mean free paths
+        if material.lower() == 'concrete':
+            # Linear attenuation coefficients for concrete (cm^-1)
+            # Energy (MeV): 0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0
+            energies = np.array([0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0])
+            mu_values = np.array([0.204, 0.149, 0.105, 0.086, 0.075, 0.069, 0.064, 0.057, 0.054])
+            
+            # Interpolate to get mu at the given energy
+            if energy <= energies[0]:
+                mu = mu_values[0]
+            elif energy >= energies[-1]:
+                mu = mu_values[-1]
+            else:
+                mu = np.interp(energy, energies, mu_values)
+            
+            # Calculate thickness in mean free paths
+            mfp_thickness = thickness * mu
+            
+            # Parameters for Taylor form buildup factor for concrete
+            # Format: [A, a, B, b] for each energy
+            # B(E, x) = A*exp(-a*x) + B*exp(-b*x)
+            taylor_params = {
+                0.5: [13.71, -0.075, 1.314, 0.3581],
+                1.0: [10.97, -0.043, 0.521, 0.2513],
+                2.0: [7.43, -0.011, 0.2522, 0.1876],
+                3.0: [6.06, 0.0078, 0.1456, 0.1471],
+                4.0: [5.28, 0.0205, 0.0988, 0.1173],
+                5.0: [4.76, 0.0295, 0.0734, 0.0958],
+                6.0: [4.41, 0.0365, 0.0576, 0.0786],
+                8.0: [3.95, 0.0465, 0.0388, 0.0545],
+                10.0: [3.68, 0.0533, 0.028, 0.0366]
+            }
+            
+            # Find closest energy for parameters
+            closest_energy = energies[np.argmin(np.abs(energies - energy))]
+            A, a, B, b = taylor_params[closest_energy]
+            
+            # Calculate buildup factor
+            buildup = A * np.exp(-a * mfp_thickness) + B * np.exp(-b * mfp_thickness)
+            
+            logger.info(f"Buildup factor for {material} at {energy:.1f} MeV, thickness={thickness:.1f} cm: {buildup:.2f}")
+            
+            return buildup
+        else:
+            # For other materials, use a simple approximation
+            logger.warning(f"Buildup factors for {material} not implemented, using approximation")
+            
+            # Simple approximation based on energy
+            if energy < 1.0:
+                base_factor = 5.0
+            elif energy < 3.0:
+                base_factor = 3.0
+            else:
+                base_factor = 2.0
+            
+            # Scale with thickness (assuming thickness is in cm)
+            # This is a very simplified approach
+            scaled_factor = base_factor * (1.0 + 0.1 * thickness)
+            
+            return min(scaled_factor, 20.0)  # Cap at reasonable maximum
+
+@timeit
+def calculate_streaming_dose(source_energy, channel_diameter, detector_distance, wall_thickness=None):
+    """
+    Analytical approximation of dose from gamma-ray streaming through a cylindrical duct.
+    
+    Parameters:
+    -----------
+    source_energy : float
+        Source energy in MeV
+    channel_diameter : float
+        Channel diameter in cm
+    detector_distance : float
+        Distance from end of channel to detector in cm
+    wall_thickness : float, optional
+        Wall thickness in cm. If None, use value from config
+        
+    Returns:
+    --------
+    dose : float
+        Approximate dose rate in rem/hr
+    """
+    with LogSection("Calculating analytical streaming dose"):
+        # Use wall thickness from config if not provided
+        if wall_thickness is None:
+            wall_thickness = WALL_THICKNESS
+        
+        # Source strength (assume unit source for relative calculations)
+        source_strength = 1.0  # photons/s
+        
+        # Convert to point source dose at detector position without wall
+        total_distance = SOURCE_TO_WALL_DISTANCE + wall_thickness + detector_distance
+        uncollided_flux = source_strength / (4 * np.pi * total_distance**2)
+        
+        # Apply attenuation through wall thickness if there were no channel
+        mu = 0.0  # Linear attenuation coefficient in cm^-1
+        
+        # Get approximate attenuation coefficient based on energy
+        if source_energy <= 0.1:
+            mu = 0.4
+        elif source_energy <= 0.5:
+            mu = 0.2
+        elif source_energy <= 1.0:
+            mu = 0.15
+        elif source_energy <= 2.0:
+            mu = 0.11
+        elif source_energy <= 5.0:
+            mu = 0.08
+        else:
+            mu = 0.06
+        
+        # Attenuated dose without channel
+        attenuated_flux = uncollided_flux * np.exp(-mu * wall_thickness)
+        direct_dose = attenuated_flux * flux_to_dose_conversion(source_energy)
+        
+        # Calculate streaming contribution
+        # Based on simplified model from NCRP 147/ANS 6.6.1
+        
+        # Albedo factor (backscattering)
+        albedo = 0.2 * (1.0 - np.exp(-source_energy / 2.0))
+        
+        # Solid angle fraction
+        channel_radius = channel_diameter / 2.0
+        solid_angle_factor = (channel_radius**2) / (4 * SOURCE_TO_WALL_DISTANCE**2)
+        
+        # Duct transmission factor
+        aspect_ratio = wall_thickness / channel_diameter
+        # Approximation for small aspect ratios
+        if aspect_ratio < 1.0:
+            duct_factor = 1.0 - 0.8 * aspect_ratio
+        # Approximation for larger aspect ratios
+        else:
+            duct_factor = 0.2 * np.exp(-0.3 * aspect_ratio)
+        
+        # Distance correction
+        distance_factor = 1.0 / (1.0 + (detector_distance / channel_diameter)**2)
+        
+        # Combine factors for streaming dose
+        streaming_flux = source_strength * solid_angle_factor * duct_factor * distance_factor
+        streaming_dose = streaming_flux * flux_to_dose_conversion(source_energy)
+        
+        # Apply buildup factor for wall portion
+        buildup = calculate_buildup_factor(source_energy, wall_thickness)
+        
+        # Total dose is direct dose plus streaming dose
+        total_dose = direct_dose * buildup + streaming_dose
+        
+        logger.info(f"Analytical streaming dose estimate: {total_dose:.4e} rem/hr")
+        
+        return total_dose
+
+if __name__ == "__main__":
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Evaluate dose conversion factors and buildup")
+    parser.add_argument("--output", type=str, default="results/dose_evaluation",
+                        help="Output directory for plots")
+    
+    args = parser.parse_args()
+    output_dir = Path(args.output)
+    output_dir.mkdir(exist_ok=True, parents=True)
+    
+    # Plot dose conversion factors
+    energies = np.logspace(-2, 1.5, 100)  # 0.01 to 30 MeV
+    conversion_factors = flux_to_dose_conversion(energies)
+    
+    plt.figure(figsize=(10, 6))
+    plt.loglog(energies, conversion_factors, 'b-', linewidth=2)
+    plt.xlabel('Photon Energy (MeV)', fontsize=12)
+    plt.ylabel('Dose Conversion Factor\n(rem/hr)/(photons/cm²-s)', fontsize=12)
+    plt.title('ANS-6.1.1-1977 Photon Flux-to-Dose Conversion Factors', fontsize=14)
+    plt.grid(True, which='both', linestyle='--', alpha=0.5)
+    plt.tight_layout()
+    plt.savefig(output_dir / "dose_conversion_factors.png", dpi=300)
+    
+    # Plot buildup factors for different energies
+    thicknesses = np.linspace(0, 100, 50)  # 0 to 100 cm
+    energies_to_plot = [0.5, 1.0, 2.0, 5.0, 10.0]
+    
+    plt.figure(figsize=(10, 6))
+    for energy in energies_to_plot:
+        buildup_factors = [calculate_buildup_factor(energy, t) for t in thicknesses]
+        plt.plot(thicknesses, buildup_factors, linewidth=2, label=f'{energy} MeV')
+    
+    plt.xlabel('Concrete Thickness (cm)', fontsize=12)
+    plt.ylabel('Buildup Factor', fontsize=12)
+    plt.title('Gamma-Ray Buildup Factors for Concrete', fontsize=14)
+    plt.grid(True, linestyle='--', alpha=0.5)
+    plt.legend(title='Photon Energy', fontsize=10)
+    plt.tight_layout()
+    plt.savefig(output_dir / "buildup_factors.png", dpi=300)
+    
+    logger.info(f"Dose evaluation plots saved to {output_dir}")
+
