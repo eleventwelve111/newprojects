@@ -30,408 +30,525 @@ def calculate_spectrum_metrics(spectrum_data):
     """
     with LogSection("Calculating spectrum metrics"):
         # Extract data
-        energy_midpoints = np.array(spectrum_data['energy_midpoints'])
-        flux_spectrum = np.array(spectrum_data['flux_spectrum'])
+        energy_midpoints = spectrum_data['energy_midpoints']
+        flux_spectrum = spectrum_data['flux_spectrum']
         
-        # Calculate total flux
-        total_flux = np.sum(flux_spectrum)
+        # Validate input data
+        if len(energy_midpoints) != len(flux_spectrum):
+            raise ValueError("Energy midpoints and flux spectrum must have the same length")
         
-        # Calculate mean energy
-        if total_flux > 0:
-            mean_energy = np.sum(energy_midpoints * flux_spectrum) / total_flux
+        if len(energy_midpoints) < 2:
+            raise ValueError("Spectrum must have at least two data points")
+        
+        # Calculate energy bin widths
+        if 'energy_bins' in spectrum_data:
+            energy_bins = spectrum_data['energy_bins']
+            bin_widths = np.diff(energy_bins)
         else:
-            mean_energy = 0.0
+            # Estimate bin widths from midpoints
+            extended_midpoints = np.concatenate([
+                [energy_midpoints[0] - (energy_midpoints[1] - energy_midpoints[0])/2],
+                energy_midpoints,
+                [energy_midpoints[-1] + (energy_midpoints[-1] - energy_midpoints[-2])/2]
+            ])
+            bin_widths = np.diff(extended_midpoints)
         
-        # Calculate dose contribution
+        # Initialize metrics dictionary
+        metrics = {}
+        
+        # Total flux (particles/cm²/s)
+        total_flux = np.sum(flux_spectrum * bin_widths)
+        metrics['total_flux'] = total_flux
+        
+        # Calculate dose using flux-to-dose conversion factors
         dose_contribution = np.zeros_like(flux_spectrum)
         for i, energy in enumerate(energy_midpoints):
-            dose_contribution[i] = flux_spectrum[i] * flux_to_dose_conversion(energy)
+            dose_contribution[i] = flux_spectrum[i] * bin_widths[i] * flux_to_dose_conversion(energy)
         
         total_dose = np.sum(dose_contribution)
+        metrics['total_dose'] = total_dose
+        metrics['dose_contribution'] = dose_contribution
         
-        # Calculate dose-weighted mean energy
-        if total_dose > 0:
-            dose_weighted_mean_energy = np.sum(energy_midpoints * dose_contribution) / total_dose
-        else:
-            dose_weighted_mean_energy = 0.0
-        
-        # Find the peak energy (energy with maximum flux)
-        peak_index = np.argmax(flux_spectrum)
-        peak_energy = energy_midpoints[peak_index]
-        
-        # Calculate the full width at half maximum (FWHM)
-        half_max = flux_spectrum[peak_index] / 2.0
-        
-        # Find energies where flux is above half maximum
-        above_half_max = flux_spectrum >= half_max
-        
-        # Create interpolation function for more accurate FWHM
-        if np.any(above_half_max):
-            # Get indices where spectrum crosses half maximum
-            crossing_indices = np.where(np.diff(above_half_max.astype(int)))[0]
-            
-            if len(crossing_indices) >= 2:
-                # For each crossing, interpolate to find exact energy where flux = half_max
-                crossing_energies = []
-                for idx in crossing_indices:
-                    # Make sure we don't go beyond array boundaries
-                    if idx + 1 < len(flux_spectrum):
-                        e1, e2 = energy_midpoints[idx], energy_midpoints[idx + 1]
-                        f1, f2 = flux_spectrum[idx], flux_spectrum[idx + 1]
-                        
-                        # Linear interpolation
-                        if f1 != f2:  # Avoid division by zero
-                            e_crossing = e1 + (half_max - f1) * (e2 - e1) / (f2 - f1)
-                            crossing_energies.append(e_crossing)
-                
-                if len(crossing_energies) >= 2:
-                    fwhm = max(crossing_energies) - min(crossing_energies)
-                else:
-                    # Fallback if interpolation fails
-                    energy_above = energy_midpoints[above_half_max]
-                    fwhm = energy_above[-1] - energy_above[0] if len(energy_above) > 0 else 0.0
-            else:
-                # If there's only one crossing or none
-                energy_above = energy_midpoints[above_half_max]
-                fwhm = energy_above[-1] - energy_above[0] if len(energy_above) > 0 else 0.0
-        else:
-            fwhm = 0.0
-        
-        # Hardening ratio (ratio of flux above 1 MeV to total flux)
-        high_energy_mask = energy_midpoints > 1.0
+        # Calculate mean energy (flux-weighted)
         if total_flux > 0:
-            hardening_ratio = np.sum(flux_spectrum[high_energy_mask]) / total_flux
+            mean_energy = np.sum(energy_midpoints * flux_spectrum * bin_widths) / total_flux
         else:
-            hardening_ratio = 0.0
+            mean_energy = 0.0
+        metrics['mean_energy'] = mean_energy
         
-        # Calculate metrics
-        metrics = {
-                        'total_flux': float(total_flux),
-            'mean_energy': float(mean_energy),
-            'peak_energy': float(peak_energy),
-            'fwhm': float(fwhm),
-            'total_dose': float(total_dose),
-            'dose_weighted_mean_energy': float(dose_weighted_mean_energy),
-            'hardening_ratio': float(hardening_ratio)
-        }
+        # Calculate median energy (energy at which cumulative flux = 50% of total)
+        if total_flux > 0:
+            cumulative_flux = np.cumsum(flux_spectrum * bin_widths)
+            normalized_cumulative = cumulative_flux / total_flux
+            # Interpolate to find median energy
+            try:
+                median_energy_interp = interpolate.interp1d(
+                    normalized_cumulative, energy_midpoints, bounds_error=False, fill_value="extrapolate")
+                median_energy = float(median_energy_interp(0.5))
+            except:
+                # Fallback if interpolation fails
+                idx = np.argmin(np.abs(normalized_cumulative - 0.5))
+                median_energy = energy_midpoints[idx]
+        else:
+            median_energy = 0.0
+        metrics['median_energy'] = median_energy
         
-        logger.info(f"Spectrum metrics calculated:")
-        logger.info(f"  Total flux: {total_flux:.4e} particles/cm²/source_particle")
-        logger.info(f"  Mean energy: {mean_energy:.4f} MeV")
-        logger.info(f"  Peak energy: {peak_energy:.4f} MeV")
-        logger.info(f"  FWHM: {fwhm:.4f} MeV")
-        logger.info(f"  Total dose: {total_dose:.4e} rem/hr/source_intensity")
+        # Energy at peak flux
+        peak_idx = np.argmax(flux_spectrum)
+        peak_energy = energy_midpoints[peak_idx]
+        metrics['peak_energy'] = peak_energy
+        metrics['peak_flux'] = flux_spectrum[peak_idx]
+        
+        # Calculate hardness ratio (high energy flux / low energy flux)
+        # Define boundary as 1 MeV
+        boundary_idx = np.argmin(np.abs(energy_midpoints - 1.0))
+        low_energy_flux = np.sum(flux_spectrum[:boundary_idx] * bin_widths[:boundary_idx])
+        high_energy_flux = np.sum(flux_spectrum[boundary_idx:] * bin_widths[boundary_idx:])
+        
+        if low_energy_flux > 0:
+            hardness_ratio = high_energy_flux / low_energy_flux
+        else:
+            hardness_ratio = float('inf')
+        metrics['hardness_ratio'] = hardness_ratio
+        
+        # Calculate spectrum width (FWHM)
+        half_max = flux_spectrum[peak_idx] / 2.0
+        try:
+            # Find energies where flux is half of maximum
+            e_interp = interpolate.interp1d(
+                energy_midpoints, flux_spectrum - half_max, bounds_error=False, fill_value="extrapolate")
+            
+            # Use optimization to find zero crossings
+            def find_zero(e_guess):
+                return optimize.fsolve(lambda x: e_interp(x), e_guess)[0]
+            
+            try:
+                left_e = find_zero(peak_energy / 2)
+                right_e = find_zero(peak_energy * 2)
+                fwhm = right_e - left_e
+            except:
+                # Fallback if optimization fails
+                fwhm = 0.0
+                
+        except:
+            # If interpolation fails, estimate using nearest points
+            above_half_max = flux_spectrum >= half_max
+            if np.sum(above_half_max) > 0:
+                fwhm = energy_midpoints[above_half_max][-1] - energy_midpoints[above_half_max][0]
+            else:
+                fwhm = 0.0
+                
+        metrics['fwhm'] = fwhm
+        
+        # Calculate effective dose energy (dose-weighted average energy)
+        if total_dose > 0:
+            effective_dose_energy = np.sum(energy_midpoints * dose_contribution) / total_dose
+        else:
+            effective_dose_energy = 0.0
+        metrics['effective_dose_energy'] = effective_dose_energy
+        
+        # Add spectrum data for reference
+        metrics['energy_midpoints'] = energy_midpoints
+        metrics['flux_spectrum'] = flux_spectrum
+        metrics['bin_widths'] = bin_widths
+        
+        logger.info(f"Spectrum metrics calculated: Total flux={total_flux:.2e}, Mean energy={mean_energy:.2f} MeV")
         
         return metrics
 
 @timeit
-def plot_energy_spectrum(spectrum_data, title=None, output_file=None):
+def compare_spectra(spectrum1, spectrum2, normalize=True, output_dir=None):
     """
-    Plot energy spectrum from simulation results.
+    Compare two energy spectra and calculate similarity metrics.
+    
+    Parameters:
+    -----------
+    spectrum1 : dict
+        First spectrum data dictionary
+    spectrum2 : dict
+        Second spectrum data dictionary
+    normalize : bool, default=True
+        Whether to normalize spectra before comparison
+    output_dir : Path or str, optional
+        Directory to save comparison plot
+        
+    Returns:
+    --------
+    comparison : dict
+        Dictionary of comparison metrics
+    """
+    with LogSection("Comparing spectra"):
+        # Extract data
+        energy1 = spectrum1['energy_midpoints']
+        flux1 = spectrum1['flux_spectrum']
+        
+        energy2 = spectrum2['energy_midpoints']
+        flux2 = spectrum2['flux_spectrum']
+        
+        # Rebin to common energy grid if necessary
+        if not np.array_equal(energy1, energy2):
+            logger.info("Rebinning spectra to common energy grid")
+            # Create common energy grid (use the finer one)
+            if len(energy1) >= len(energy2):
+                common_energy = energy1
+                # Interpolate spectrum2 to common grid
+                flux2_interp = interpolate.interp1d(
+                    energy2, flux2, bounds_error=False, fill_value=0.0)(common_energy)
+                flux1_common = flux1
+            else:
+                common_energy = energy2
+                # Interpolate spectrum1 to common grid
+                flux1_interp = interpolate.interp1d(
+                    energy1, flux1, bounds_error=False, fill_value=0.0)(common_energy)
+                flux1_common = flux1_interp
+                flux2_common = flux2
+        else:
+            common_energy = energy1
+            flux1_common = flux1
+            flux2_common = flux2
+        
+        # Normalize if requested
+        if normalize:
+            flux1_common = flux1_common / np.sum(flux1_common) if np.sum(flux1_common) > 0 else flux1_common
+            flux2_common = flux2_common / np.sum(flux2_common) if np.sum(flux2_common) > 0 else flux2_common
+        
+        # Calculate comparison metrics
+        comparison = {}
+        
+        # Calculate root mean square error
+        rmse = np.sqrt(np.mean((flux1_common - flux2_common)**2))
+        comparison['rmse'] = rmse
+        
+        # Calculate correlation coefficient
+        corr = np.corrcoef(flux1_common, flux2_common)[0, 1]
+        comparison['correlation'] = corr
+        
+        # Calculate chi-squared statistic
+        nonzero = (flux1_common > 0) & (flux2_common > 0)
+        if np.sum(nonzero) > 0:
+            chi2 = np.sum(((flux1_common[nonzero] - flux2_common[nonzero])**2) / flux2_common[nonzero])
+            comparison['chi_squared'] = chi2
+            comparison['chi_squared_reduced'] = chi2 / max(1, np.sum(nonzero) - 1)
+        else:
+            comparison['chi_squared'] = float('nan')
+            comparison['chi_squared_reduced'] = float('nan')
+        
+        # Calculate area between curves
+        area_diff = np.trapz(np.abs(flux1_common - flux2_common), common_energy)
+        comparison['area_difference'] = area_diff
+        
+        # Calculate max absolute difference
+        max_diff = np.max(np.abs(flux1_common - flux2_common))
+        comparison['max_difference'] = max_diff
+        
+        # Create comparison plot
+        if output_dir is not None:
+            output_dir = Path(output_dir)
+            output_dir.mkdir(exist_ok=True, parents=True)
+            
+            fig, ax = plt.subplots(figsize=(10, 6))
+            
+            ax.loglog(common_energy, flux1_common, 'b-', linewidth=2, label='Spectrum 1')
+            ax.loglog(common_energy, flux2_common, 'r--', linewidth=2, label='Spectrum 2')
+            ax.fill_between(common_energy, flux1_common, flux2_common, alpha=0.3, color='gray')
+            
+            ax.set_xlabel('Energy (MeV)', fontsize=12)
+            ax.set_ylabel('Normalized Flux', fontsize=12) if normalize else ax.set_ylabel('Flux', fontsize=12)
+            ax.set_title('Spectrum Comparison', fontsize=14)
+            ax.grid(True, which='both', linestyle='--', alpha=0.5)
+            ax.legend(fontsize=10)
+            
+            # Add text with comparison metrics
+            text = (f"RMSE: {rmse:.2e}\n"
+                   f"Correlation: {corr:.2f}\n"
+                   f"Chi²/DoF: {comparison['chi_squared_reduced']:.2f}\n"
+                                      f"Area Diff: {area_diff:.2e}\n"
+                   f"Max Diff: {max_diff:.2e}")
+            
+            bbox_props = dict(boxstyle="round,pad=0.5", fc="white", ec="gray", alpha=0.8)
+            ax.text(0.05, 0.95, text, transform=ax.transAxes, fontsize=10,
+                  verticalalignment='top', bbox=bbox_props)
+            
+            plt.tight_layout()
+            plt.savefig(output_dir / "spectrum_comparison.png", dpi=300, bbox_inches='tight')
+            
+            logger.info(f"Spectrum comparison plot saved to {output_dir / 'spectrum_comparison.png'}")
+        
+        logger.info(f"Spectrum comparison completed: RMSE={rmse:.2e}, Correlation={corr:.2f}")
+        
+        return comparison
+
+@timeit
+def analyze_spectrum_sensitivity(spectra_dict, parameter, output_dir=None):
+    """
+    Analyze the sensitivity of spectrum to a specific parameter.
+    
+    Parameters:
+    -----------
+    spectra_dict : dict
+        Dictionary of spectra where keys are parameter values
+    parameter : str
+        Name of the parameter being analyzed
+    output_dir : Path or str, optional
+        Directory to save sensitivity plot
+        
+    Returns:
+    --------
+    sensitivity : dict
+        Dictionary of sensitivity metrics
+    """
+    with LogSection(f"Analyzing spectrum sensitivity to {parameter}"):
+        if len(spectra_dict) < 2:
+            logger.warning("Need at least two spectra to analyze sensitivity")
+            return {}
+        
+        # Extract parameter values and sort
+        param_values = sorted(list(spectra_dict.keys()))
+        base_value = param_values[0]
+        base_spectrum = spectra_dict[base_value]
+        
+        # Calculate metrics for each parameter value
+        metrics = {}
+        for value in param_values[1:]:
+            spectrum = spectra_dict[value]
+            comp = compare_spectra(base_spectrum, spectrum, normalize=True)
+            metrics[value] = comp
+        
+        # Calculate overall sensitivity metrics
+        sensitivity = {
+            'parameter': parameter,
+            'base_value': base_value,
+            'values': param_values,
+            'comparisons': metrics
+        }
+        
+        # Calculate rate of change for each metric
+        for metric in ['rmse', 'correlation', 'area_difference', 'max_difference']:
+            if all(metric in metrics[v] for v in param_values[1:]):
+                values = np.array(param_values[1:])
+                metric_values = np.array([metrics[v][metric] for v in values])
+                
+                # Calculate slope using linear regression
+                slope, intercept = np.polyfit(values - base_value, metric_values, 1)
+                sensitivity[f'{metric}_slope'] = slope
+                
+                # Calculate normalized sensitivity (percent change per percent change in parameter)
+                if base_value != 0:
+                    norm_values = (values - base_value) / base_value
+                    if np.mean(metric_values) != 0:
+                        norm_sensitivities = (metric_values - metric_values[0]) / np.mean(metric_values)
+                        norm_sensitivity = np.mean(norm_sensitivities / norm_values)
+                        sensitivity[f'{metric}_normalized_sensitivity'] = norm_sensitivity
+        
+        # Create sensitivity plot
+        if output_dir is not None:
+            output_dir = Path(output_dir)
+            output_dir.mkdir(exist_ok=True, parents=True)
+            
+            # Create figure with multiple subplots
+            fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+            axes = axes.flatten()
+            
+            # Plot metrics vs parameter value
+            metrics_to_plot = [
+                ('rmse', 'RMSE', 'Root Mean Square Error'),
+                ('correlation', 'Correlation', 'Correlation Coefficient'),
+                ('area_difference', 'Area Difference', 'Area Between Curves'),
+                ('max_difference', 'Max Difference', 'Maximum Absolute Difference')
+            ]
+            
+            for i, (metric, label, title) in enumerate(metrics_to_plot):
+                ax = axes[i]
+                values = []
+                metric_values = []
+                
+                for value in param_values[1:]:
+                    if metric in metrics[value]:
+                        values.append(value)
+                        metric_values.append(metrics[value][metric])
+                
+                if values:
+                    ax.plot(values, metric_values, 'o-', linewidth=2)
+                    ax.set_xlabel(f'{parameter.capitalize()} Value', fontsize=12)
+                    ax.set_ylabel(label, fontsize=12)
+                    ax.set_title(title, fontsize=14)
+                    ax.grid(True, linestyle='--', alpha=0.5)
+                    
+                    # Add trendline
+                    try:
+                        z = np.polyfit(values, metric_values, 1)
+                        p = np.poly1d(z)
+                        ax.plot(values, p(values), "r--", alpha=0.7)
+                        ax.text(0.05, 0.95, f"Slope: {z[0]:.2e}", transform=ax.transAxes,
+                               fontsize=10, verticalalignment='top')
+                    except:
+                        pass
+            
+            plt.tight_layout()
+            plt.savefig(output_dir / f"{parameter}_sensitivity.png", dpi=300, bbox_inches='tight')
+            
+            # Also create a spectrum overlay plot
+            fig, ax = plt.subplots(figsize=(10, 6))
+            
+            for value in param_values:
+                spectrum = spectra_dict[value]
+                energy = spectrum['energy_midpoints']
+                flux = spectrum['flux_spectrum']
+                
+                # Normalize flux
+                norm_flux = flux / np.sum(flux) if np.sum(flux) > 0 else flux
+                
+                ax.loglog(energy, norm_flux, linewidth=2, label=f"{parameter}={value}")
+            
+            ax.set_xlabel('Energy (MeV)', fontsize=12)
+            ax.set_ylabel('Normalized Flux', fontsize=12)
+            ax.set_title(f'Spectrum Sensitivity to {parameter.capitalize()}', fontsize=14)
+            ax.grid(True, which='both', linestyle='--', alpha=0.5)
+            ax.legend(fontsize=10)
+            
+            plt.tight_layout()
+            plt.savefig(output_dir / f"{parameter}_spectra_overlay.png", dpi=300, bbox_inches='tight')
+            
+            logger.info(f"Sensitivity plots saved to {output_dir}")
+        
+        logger.info(f"Spectrum sensitivity analysis completed for {parameter}")
+        
+        return sensitivity
+
+@timeit
+def extract_characteristic_energies(spectrum_data):
+    """
+    Extract characteristic energies from a spectrum.
     
     Parameters:
     -----------
     spectrum_data : dict
-        Dictionary containing 'energy_midpoints' and 'flux_spectrum'
-    title : str, optional
-        Plot title
-    output_file : str or Path, optional
-        Output file path
-    
+        Dictionary containing spectrum data
+        
     Returns:
     --------
-    fig : matplotlib.figure.Figure
-        Matplotlib figure
+    energies : dict
+        Dictionary of characteristic energies
     """
-    with LogSection("Plotting energy spectrum"):
+    with LogSection("Extracting characteristic energies"):
         # Extract data
-        energy_midpoints = np.array(spectrum_data['energy_midpoints'])
-        flux_spectrum = np.array(spectrum_data['flux_spectrum'])
+        energy_midpoints = spectrum_data['energy_midpoints']
+        flux_spectrum = spectrum_data['flux_spectrum']
         
-        # Create figure
-        fig, ax = plt.subplots(figsize=(10, 6))
+        # Initialize result dictionary
+        energies = {}
         
-        # Plot spectrum
-        ax.semilogx(energy_midpoints, flux_spectrum, 'b-', linewidth=2)
-        ax.fill_between(energy_midpoints, 0, flux_spectrum, alpha=0.3, color='blue')
-        
-        # Add labels and title
-        ax.set_xlabel('Energy (MeV)', fontsize=12)
-        ax.set_ylabel('Flux (particles/cm²/MeV/source_particle)', fontsize=12)
-        
-        if title:
-            ax.set_title(title, fontsize=14)
+        # Calculate total flux and cumulative distribution
+        if 'bin_widths' in spectrum_data:
+            bin_widths = spectrum_data['bin_widths']
         else:
-            ax.set_title('Energy Spectrum', fontsize=14)
+            # Estimate bin widths from midpoints
+            extended_midpoints = np.concatenate([
+                [energy_midpoints[0] - (energy_midpoints[1] - energy_midpoints[0])/2],
+                energy_midpoints,
+                [energy_midpoints[-1] + (energy_midpoints[-1] - energy_midpoints[-2])/2]
+            ])
+            bin_widths = np.diff(extended_midpoints)
         
-        # Add grid
-        ax.grid(True, which='both', linestyle='--', alpha=0.5)
+        total_flux = np.sum(flux_spectrum * bin_widths)
+        cum_flux = np.cumsum(flux_spectrum * bin_widths)
+        norm_cum_flux = cum_flux / total_flux if total_flux > 0 else cum_flux
         
-        # Save figure if output file is specified
-        if output_file:
-            output_path = Path(output_file)
-            output_path.parent.mkdir(exist_ok=True, parents=True)
-            plt.savefig(output_path, dpi=300, bbox_inches='tight')
-            logger.info(f"Spectrum plot saved to {output_path}")
+        # Peak energy (modal energy)
+        peak_idx = np.argmax(flux_spectrum)
+        energies['peak'] = energy_midpoints[peak_idx]
         
-        return fig
+        # Extract quantile energies (E10, E50, E90)
+        quantiles = [0.1, 0.5, 0.9]
+        for q in quantiles:
+            try:
+                # Interpolate to find quantile energy
+                quantile_interp = interpolate.interp1d(
+                    norm_cum_flux, energy_midpoints, bounds_error=False, fill_value="extrapolate")
+                energies[f'E{int(q*100)}'] = float(quantile_interp(q))
+            except:
+                # Fallback if interpolation fails
+                idx = np.argmin(np.abs(norm_cum_flux - q))
+                energies[f'E{int(q*100)}'] = energy_midpoints[idx]
+        
+        # Mean energy (flux-weighted average)
+        if total_flux > 0:
+            mean_energy = np.sum(energy_midpoints * flux_spectrum * bin_widths) / total_flux
+        else:
+            mean_energy = 0.0
+        energies['mean'] = mean_energy
+        
+        # Find cutoff energy (energy above which flux drops to 1% of peak)
+        threshold = 0.01 * flux_spectrum[peak_idx]
+        above_threshold = flux_spectrum >= threshold
+        if np.any(above_threshold & (energy_midpoints > energies['peak'])):
+            cutoff_idx = np.max(np.where(above_threshold & (energy_midpoints > energies['peak']))[0])
+            energies['cutoff'] = energy_midpoints[cutoff_idx]
+        else:
+            energies['cutoff'] = energies['peak']
+        
+        # Energy width (difference between 10% and 90% quantiles)
+        energies['width'] = energies['E90'] - energies['E10']
+        
+        logger.info(f"Characteristic energies extracted: Peak={energies['peak']:.2f} MeV, "
+                  f"Median={energies['E50']:.2f} MeV, Mean={energies['mean']:.2f} MeV")
+        
+        return energies
 
-@timeit
-def analyze_spectrum_trends(results_list):
-    """
-    Analyze trends in spectra across different parameters.
+if __name__ == "__main__":
+    import argparse
+    import json
     
-    Parameters:
-    -----------
-    results_list : list
-        List of simulation result dictionaries
+    parser = argparse.ArgumentParser(description="Analyze energy spectra from simulation results")
+    parser.add_argument("--results", type=str, required=True, help="Path to results JSON file")
+    parser.add_argument("--output", type=str, default=None, help="Output directory for plots and data")
     
-    Returns:
-    --------
-    trends : dict
-        Dictionary of spectrum trend analyses
-    """
-    with LogSection("Analyzing spectrum trends"):
-        # Initialize trends dictionary
-        trends = {
-            'energy_dependence': {},
-            'diameter_dependence': {},
-            'distance_dependence': {},
-            'angle_dependence': {}
-        }
-        
-        # Group results by parameters
-        by_energy = {}
-        by_diameter = {}
-        by_distance = {}
-        by_angle = {}
-        
-        for result in results_list:
+    args = parser.parse_args()
+    
+    # Load results
+    with open(args.results, 'r') as f:
+        results = json.load(f)
+    
+    # Set output directory
+    if args.output:
+        output_dir = Path(args.output)
+    else:
+        output_dir = PLOTS_DIR / "spectrum_analysis"
+    output_dir.mkdir(exist_ok=True, parents=True)
+    
+    # Process each result
+    all_metrics = []
+    for i, result in enumerate(results):
+        if 'energy_midpoints' in result and 'flux_spectrum' in result:
             params = result['parameters']
-            energy = params['energy']
-            diameter = params['channel_diameter']
-            distance = params['detector_distance']
-            angle = params['detector_angle']
             
-            # Calculate metrics for this result
+            logger.info(f"Analyzing spectrum {i+1}/{len(results)}: "
+                      f"E={params['energy']} MeV, D={params['channel_diameter']} cm, "
+                      f"Distance={params['detector_distance']} cm, Angle={params['detector_angle']}°")
+            
+            # Calculate spectrum metrics
             metrics = calculate_spectrum_metrics(result)
             
-            # Store metrics by parameter
-            if energy not in by_energy:
-                by_energy[energy] = []
-            by_energy[energy].append(metrics)
+            # Extract characteristic energies
+            energies = extract_characteristic_energies(result)
             
-            if diameter not in by_diameter:
-                by_diameter[diameter] = []
-            by_diameter[diameter].append(metrics)
+            # Save metrics and energies to result
+            result['spectrum_metrics'] = metrics
+            result['characteristic_energies'] = energies
             
-            if distance not in by_distance:
-                by_distance[distance] = []
-            by_distance[distance].append(metrics)
-            
-            if angle not in by_angle:
-                by_angle[angle] = []
-            by_angle[angle].append(metrics)
-        
-        # Analyze energy dependence (at fixed diameter, distance, angle)
-        reference_diameter = CHANNEL_DIAMETERS[0]
-        reference_distance = DETECTOR_DISTANCES[0]
-        reference_angle = DETECTOR_ANGLES[0]
-        
-        energy_trend_data = []
-        for energy in SOURCE_ENERGIES:
-            # Find results with matching reference parameters
-            matching_results = []
-            for result in results_list:
-                params = result['parameters']
-                if (params['energy'] == energy and 
-                    params['channel_diameter'] == reference_diameter and
-                    params['detector_distance'] == reference_distance and
-                    params['detector_angle'] == reference_angle):
-                    matching_results.append(result)
-            
-            if matching_results:
-                # Use the first matching result
-                metrics = calculate_spectrum_metrics(matching_results[0])
-                energy_trend_data.append({
-                    'energy': energy,
-                    'metrics': metrics
-                })
-        
-        trends['energy_dependence'] = {
-            'reference_parameters': {
-                'diameter': reference_diameter,
-                'distance': reference_distance,
-                'angle': reference_angle
-            },
-            'trend_data': energy_trend_data
-        }
-        
-        # Similar analyses for other parameters...
-        # (diameter dependence, distance dependence, angle dependence)
-        
-        # Analyze spread vs energy
-        # For each energy, look at how flux falls off with angle
-        energy_spread_data = []
-        for energy in SOURCE_ENERGIES:
-            angle_data = []
-            for angle in DETECTOR_ANGLES:
-                matching_results = []
-                for result in results_list:
-                    params = result['parameters']
-                    if (params['energy'] == energy and 
-                        params['channel_diameter'] == reference_diameter and
-                        params['detector_distance'] == reference_distance and
-                        params['detector_angle'] == angle):
-                        matching_results.append(result)
-                
-                if matching_results:
-                    metrics = calculate_spectrum_metrics(matching_results[0])
-                    angle_data.append({
-                        'angle': angle,
-                        'total_flux': metrics['total_flux'],
-                        'total_dose': metrics['total_dose']
-                    })
-            
-            if angle_data:
-                # Calculate how quickly flux falls off with angle
-                angles = np.array([item['angle'] for item in angle_data])
-                fluxes = np.array([item['total_flux'] for item in angle_data])
-                
-                # Normalize to on-axis flux
-                if fluxes[0] > 0:
-                    normalized_fluxes = fluxes / fluxes[0]
-                    
-                    # Find angle where flux drops to 50% and 10%
-                    if len(angles) > 1:
-                        try:
-                            flux_50_angle = np.interp(0.5, normalized_fluxes[::-1], angles[::-1])
-                            flux_10_angle = np.interp(0.1, normalized_fluxes[::-1], angles[::-1])
-                        except:
-                            flux_50_angle = np.nan
-                            flux_10_angle = np.nan
-                    else:
-                        flux_50_angle = np.nan
-                        flux_10_angle = np.nan
-                else:
-                    flux_50_angle = np.nan
-                    flux_10_angle = np.nan
-                
-                energy_spread_data.append({
-                    'energy': energy,
-                    'angle_data': angle_data,
-                    'flux_50_angle': float(flux_50_angle),
-                    'flux_10_angle': float(flux_10_angle)
-                })
-        
-        trends['energy_spread_analysis'] = energy_spread_data
-        
-        logger.info(f"Spectrum trend analysis complete")
-        
-        return trends
-
-@timeit
-def plot_spectrum_comparison(results_list, parameter='energy', fixed_params=None, output_file=None):
-    """
-    Plot spectrum comparison across different values of a parameter.
-    
-    Parameters:
-    -----------
-    results_list : list
-        List of simulation result dictionaries
-    parameter : str
-        Parameter to vary ('energy', 'diameter', 'distance', 'angle')
-    fixed_params : dict, optional
-        Fixed parameter values for other parameters
-    output_file : str or Path, optional
-        Output file path
-    
-    Returns:
-    --------
-    fig : matplotlib.figure.Figure
-        Matplotlib figure
-    """
-    with LogSection(f"Plotting spectrum comparison by {parameter}"):
-        # Default fixed parameters if not provided
-        if fixed_params is None:
-            fixed_params = {
-                'energy': SOURCE_ENERGIES[0],
-                'channel_diameter': CHANNEL_DIAMETERS[0],
-                'detector_distance': DETECTOR_DISTANCES[0],
-                'detector_angle': DETECTOR_ANGLES[0]
+            # Record metrics with parameters for summary
+            metrics_with_params = {
+                'energy': params['energy'],
+                'channel_diameter': params['channel_diameter'],
+                'detector_distance': params['detector_distance'],
+                'detector_angle': params['detector_angle'],
+                **{f'spectrum_{k}': v for k, v in metrics.items() if not isinstance(v, (list, np.ndarray))},
+                **{f'energy_{k}': v for k, v in energies.items()}
             }
-            
-            # Remove the parameter we're varying
-            if parameter in fixed_params:
-                del fixed_params[parameter]
-        
-        # Find parameter values to compare
-        if parameter == 'energy':
-            values = SOURCE_ENERGIES
-            param_name = 'energy'
-            param_label = 'Energy (MeV)'
-        elif parameter == 'diameter':
-            values = CHANNEL_DIAMETERS
-            param_name = 'channel_diameter'
-            param_label = 'Channel Diameter (cm)'
-        elif parameter == 'distance':
-            values = DETECTOR_DISTANCES
-            param_name = 'detector_distance'
-            param_label = 'Detector Distance (cm)'
-        elif parameter == 'angle':
-            values = DETECTOR_ANGLES
-            param_name = 'detector_angle'
-            param_label = 'Detector Angle (degrees)'
-        else:
-            raise ValueError(f"Unknown parameter: {parameter}")
-        
-        # Group results by parameter value
-        grouped_results = {}
-        for value in values:
-            matching_results = []
-            for result in results_list:
-                params = result['parameters']
-                matches = params[param_name] == value
-                
-                # Check if fixed parameters match
-                for fixed_param, fixed_value in fixed_params.items():
-                    matches = matches and (params[fixed_param] == fixed_value)
-                
-                if matches:
-                    matching_results.append(result)
-            
-            if matching_results:
-                grouped_results[value] = matching_results[0]
-        
-        # Create figure
-        fig, ax = plt.subplots(figsize=(12, 8))
-        
-        # Plot spectra for each parameter value
-        for value, result in grouped_results.items():
-            energy_midpoints = np.array(result['energy_midpoints'])
-            flux_spectrum = np.array(result['flux_spectrum'])
-            
-            # Plot spectrum
-            label = f"{param_label} = {value}"
-            ax.loglog(energy_midpoints, flux_spectrum, linewidth=2, label=label)
-        
-        # Add labels and title
-        ax.set_xlabel('Energy (MeV)', fontsize=12)
-        ax.set_ylabel('Flux (particles/cm²/MeV/source_particle)', fontsize=12)
-        
-        fixed_param_str = ', '.join([f"{k}={v}" for k, v in fixed_params.items()])
-        ax.set_title(f'Energy Spectrum Comparison by {param_label}\nFixed Parameters: {fixed_param_str}', fontsize=14)
-        
-        # Add grid and legend
-        ax.grid(True, which='both', linestyle='--', alpha=0.5)
-        ax.legend(fontsize=10)
-        
-        # Save figure if output file is specified
-        if output_file:
-            output_path = Path(output_file)
-            output_path.parent.mkdir(exist_ok=True, parents=True)
-            plt.savefig(output_path, dpi=300, bbox_inches='tight')
-            logger.info(f"Spectrum comparison plot saved to {output_path}")
-        
-        return fig
-
+            all_metrics.append(metrics_with_params)
+    
+    # Create summary dataframe
+    df = pd.DataFrame(all_metrics)
+    df.to_csv(output_dir / "spectrum_metrics_summary.csv", index=False)
+    
+    logger.info(f"Spectrum analysis complete. Results saved to {output_dir}")
